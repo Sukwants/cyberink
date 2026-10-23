@@ -1,5 +1,6 @@
 import path from 'node:path';
 import dotenv from 'dotenv';
+import { isIP } from 'node:net';
 import type { AppConfig } from './contracts.js';
 
 const local = (host: string) => ['127.0.0.1', 'localhost', '::1'].includes(host);
@@ -11,8 +12,10 @@ function integer(value: string | undefined, fallback: number, max = 65535): numb
 export function buildConfig(e: NodeJS.ProcessEnv): AppConfig {
  const env = e.NODE_ENV ?? 'development';
  if (!['development','test','production'].includes(env)) throw new Error('Invalid NODE_ENV');
+ const trustedProxies = (e.TRUST_PROXY ?? '').split(',').map(value => value.trim()).filter(Boolean);
+ if (trustedProxies.some(address => !isIP(address))) throw new Error('TRUST_PROXY must be a comma-separated list of proxy IP addresses');
  const config: AppConfig = {
-  env: env as AppConfig['env'], host: e.HOST ?? '127.0.0.1',
+  env: env as AppConfig['env'], trustedProxies, host: e.HOST ?? '127.0.0.1',
   httpPort: integer(e.HTTP_PORT, 3000), smtpPort: integer(e.SMTP_PORT, 2525),
   domains: (e.MAIL_DOMAINS ?? 'example.test').split(',').map(s => s.trim().toLowerCase()),
   maxMessageBytes: integer(e.MAX_MESSAGE_BYTES, 10 * 1024 * 1024, 50 * 1024 * 1024),

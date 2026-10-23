@@ -90,6 +90,46 @@ test('Web sessions reject cross-site changes and enforce mailbox ownership', asy
   assert.equal(invalidSend.statusCode, 400); assert.equal(sends, 0);
   const sent = await app.inject({ method: 'POST', url: '/api/send', headers: auth, payload: { from: user.email, to: ['local@example.test'], subject: 'test', text: 'test' } });
   assert.equal(sent.statusCode, 201); assert.equal((sent.json() as OutboundRecord).status, 'sent'); assert.equal(sends, 1);
+  await t.test('HTTPS proxy preserves origin and CSRF protection and sets secure cookies', async () => {
+    const proxyApp = await buildWeb({
+      config: { ...config, env: 'production', secureCookies: true, trustedProxies: ['127.0.0.1'] },
+      repository, outbound,
+    });
+    try {
+      const headers = {
+        host: '127.0.0.1:3000',
+        origin: 'https://mail.example.test:8443',
+        'x-forwarded-host': 'mail.example.test:8443',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-for': '203.0.113.20',
+      };
+      const payload = { email: user.email, password: 'test-password-123' };
+      const login = await proxyApp.inject({ method: 'POST', url: '/api/login', remoteAddress: '127.0.0.1', headers, payload });
+      assert.equal(login.statusCode, 200);
+      assert.match(String(login.headers['set-cookie']), /; Secure(?:;|$)/);
+      const cookie = (login.headers['set-cookie'] as string).split(';')[0];
+      const csrfToken = login.json().csrfToken;
+      const noCsrf = await proxyApp.inject({ method: 'PATCH', url: '/api/messages/message-one', remoteAddress: '127.0.0.1', headers: { ...headers, cookie }, payload: { isRead: false } });
+      assert.equal(noCsrf.statusCode, 403);
+      const patch = await proxyApp.inject({ method: 'PATCH', url: '/api/messages/message-one', remoteAddress: '127.0.0.1', headers: { ...headers, cookie, 'x-csrf-token': csrfToken }, payload: { isRead: false } });
+      assert.equal(patch.statusCode, 200);
+      assert.equal(message.isRead, false);
+      const crossSite = await proxyApp.inject({ method: 'POST', url: '/api/login', remoteAddress: '127.0.0.1', headers: { ...headers, origin: 'https://attacker.test' }, payload });
+      assert.equal(crossSite.statusCode, 403);
+      for (const origin of ['https://mail.example.test', 'http://mail.example.test:8443']) {
+        const mismatch = await proxyApp.inject({ method: 'POST', url: '/api/login', remoteAddress: '127.0.0.1', headers: { ...headers, origin }, payload });
+        assert.equal(mismatch.statusCode, 403);
+      }
+      const crossSiteHeader = await proxyApp.inject({ method: 'POST', url: '/api/login', remoteAddress: '127.0.0.1', headers: { ...headers, 'sec-fetch-site': 'cross-site' }, payload });
+      assert.equal(crossSiteHeader.statusCode, 403);
+      const untrusted = await proxyApp.inject({ method: 'POST', url: '/api/login', remoteAddress: '203.0.113.10', headers, payload });
+      assert.equal(untrusted.statusCode, 403);
+      const disabled = await app.inject({ method: 'POST', url: '/api/login', remoteAddress: '127.0.0.1', headers, payload });
+      assert.equal(disabled.statusCode, 403);
+    } finally {
+      await proxyApp.close();
+    }
+  });
   assert.equal((await app.inject({ method: 'DELETE', url: '/api/messages/message-one', headers: auth })).statusCode, 200);
   assert.equal((await app.inject({ url: '/api/messages/message-one', headers: auth })).statusCode, 404);
   assert.equal((await app.inject({ url: '/api/attachments/attachment-one', headers: auth })).statusCode, 404);

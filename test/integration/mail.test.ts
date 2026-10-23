@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { createServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import mariadb from 'mariadb';
 import nodemailer from 'nodemailer';
@@ -188,6 +189,47 @@ test('WSL real MariaDB + SMTP + HTTP end-to-end', {timeout:90_000}, async t=>{
    assert.equal((await request('/api/attachments/'+attachmentId,'GET',undefined,'bob')).status,404);
    assert.equal((await request('/api/messages/'+received.id,'PATCH',{isRead:true},'bob')).status,404);
    assert.equal((await request('/api/messages/'+received.id,'DELETE',undefined,'bob')).status,404);
+  });
+  await t.test('real local reverse proxy accepts forwarded HTTPS origin and persists protected mutations',async()=>{
+   const proxied=await buildWeb({
+    config:{...config,trustedProxies:['127.0.0.1'],secureCookies:true},
+    repository,outbound:new OutboundService(repository,config.relay)
+   });
+   const upstream=new URL(await proxied.listen({host:'127.0.0.1',port:0}));
+   const externalHost='mail.example.test:8443';
+   // This local HTTP proxy models the headers Nginx overwrites after TLS termination.
+   const proxy=createServer((req,res)=>{
+    const forwarded=httpRequest({
+     hostname:'127.0.0.1',port:upstream.port,path:req.url,method:req.method,
+     headers:{...req.headers,host:upstream.host,
+      'x-forwarded-host':externalHost,'x-forwarded-proto':'https',
+      'x-forwarded-for':req.socket.remoteAddress}
+    },incoming=>{res.writeHead(incoming.statusCode!,incoming.headers);incoming.pipe(res);});
+    forwarded.on('error',()=>{res.writeHead(502);res.end();});
+    req.pipe(forwarded);
+   });
+   try {
+    await new Promise<void>((resolve,reject)=>{proxy.once('error',reject);proxy.listen(0,'127.0.0.1',resolve);});
+    const proxyBase='http://127.0.0.1:'+(proxy.address() as AddressInfo).port;
+    const origin='https://'+externalHost;
+    const response=await fetch(proxyBase+'/api/login',{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({email,password})});
+    assert.equal(response.status,200);
+    const login=await response.json() as {csrfToken:string};
+    assert.match(response.headers.get('set-cookie')!,/; Secure(?:;|$)/);
+    const cookie=response.headers.get('set-cookie')!.split(';')[0];
+    const headers={origin,cookie,'content-type':'application/json'};
+    const noCsrf=await fetch(proxyBase+'/api/messages/'+received.id,{method:'PATCH',headers,body:JSON.stringify({isRead:false})});
+    assert.equal(noCsrf.status,403);
+    const update=await fetch(proxyBase+'/api/messages/'+received.id,{method:'PATCH',headers:{...headers,'x-csrf-token':login.csrfToken},body:JSON.stringify({isRead:false})});
+    assert.equal(update.status,200);
+    const rows=await inspect.query('SELECT is_read FROM messages WHERE id=?',[received.id]);
+    assert.equal(Boolean(rows[0].is_read),false);
+    const rejected=await fetch(proxyBase+'/api/logout',{method:'POST',headers:{...headers,origin:'https://attacker.test','x-csrf-token':login.csrfToken}});
+    assert.equal(rejected.status,403);
+   } finally {
+    if(proxy.listening) await new Promise<void>(resolve=>proxy.close(()=>resolve()));
+    await proxied.close();
+   }
   });
   await t.test('CSRF and input validation; read/unread changes persist in MariaDB',async()=>{
    const noCsrf=await fetch(httpBase+'/api/messages/'+received.id,{method:'PATCH',headers:{cookie:session.get('alice')!.cookie,'content-type':'application/json'},body:JSON.stringify({isRead:true})});

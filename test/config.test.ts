@@ -20,3 +20,11 @@ test('salted password hashes verify without storing plaintext',async()=>{
  assert.notEqual(hash,await hashPassword('correct-test-password'));
  await assert.rejects(hashPassword('short'));
 });
+
+test('proxy trust is opt-in and accepts only explicit proxy IP addresses',()=>{
+ assert.deepEqual(buildConfig(testEnv).trustedProxies,[]);
+ assert.deepEqual(buildConfig({...testEnv,TRUST_PROXY:'127.0.0.1, ::1'}).trustedProxies,['127.0.0.1','::1']);
+ for(const address of ['true','*','proxy.example.test','0.0.0.0/0']) {
+  assert.throws(()=>buildConfig({...testEnv,TRUST_PROXY:address}),/TRUST_PROXY/);
+ }
+});
