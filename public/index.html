@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Cyberink</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <section id="login-screen" class="login-screen">
+    <div class="login-art" aria-hidden="true">
+      <div class="art-grid"></div><div class="art-orbit orbit-one"></div><div class="art-orbit orbit-two"></div>
+      <div class="art-brand"><span class="brand-icon" aria-hidden="true">C</span><span>Cyberink</span></div>
+      <div class="art-copy"><span class="eyebrow">A QUIETER PLACE FOR YOUR MAIL</span><h1>每一封来信，<br>都井然有序。</h1><p>让沟通回归简单。<br>在自己的邮箱里，安心收发每一封邮件。</p></div>
+      <div class="art-note"><span class="status-dot"></span> 专属邮箱 · 从容沟通</div>
+    </div>
+    <main class="login-panel">
+      <div class="mobile-brand"><span class="brand-icon" aria-hidden="true">C</span> Cyberink</div>
+      <form id="login-form" class="login-form">
+        <span class="eyebrow">WELCOME BACK</span>
+        <h2>登录你的邮箱</h2>
+        <p class="muted">新消息，正在这里等你。</p>
+        <label for="email">邮箱地址</label>
+        <input id="email" name="email" type="email" autocomplete="username" placeholder="name@example.com" required maxlength="254">
+        <label for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" placeholder="输入邮箱密码" required maxlength="256">
+        <p id="login-error" class="form-error" role="alert"></p>
+        <button class="button primary login-submit" type="submit">进入邮箱 <span aria-hidden="true">→</span></button>
+        <p class="login-hint">使用管理员为你创建的邮箱账号登录</p>
+      </form>
+      <p class="login-footer">Cyberink <span>简单、专注的邮件空间</span></p>
+    </main>
+  </section>
+
+  <div id="mail-screen" class="mail-layout" hidden>
+    <aside class="sidebar">
+      <a class="app-brand" href="/" aria-label="Cyberink 首页"><span class="brand-icon" aria-hidden="true">C</span><span>Cyberink</span></a>
+      <button id="compose-button" class="button primary compose-button"><span aria-hidden="true">＋</span> 写邮件</button>
+      <p class="nav-caption">我的邮箱</p>
+      <button id="inbox-nav" class="nav-item active"><span class="nav-icon" aria-hidden="true">▣</span> 收件箱 <span id="unread-badge" class="count-badge">0</span></button>
+      <div class="sidebar-bottom"><span class="avatar" id="user-avatar" aria-hidden="true">C</span><div class="account"><strong id="user-name"></strong><span id="user-email"></span></div><button id="logout-button" class="icon-button" title="退出登录" aria-label="退出登录">↪</button></div>
+    </aside>
+    <main class="mail-main">
+      <header class="topbar"><div><span class="eyebrow">YOUR DAILY CORRESPONDENCE</span><h1>收件箱 <span id="total-count">0</span></h1></div><div class="topbar-actions"><span id="connection-state" class="connection"><i></i> 已连接</span><button id="refresh-button" class="icon-button refresh-button" title="刷新收件箱" aria-label="刷新收件箱">↻</button></div></header>
+      <div class="mail-workspace">
+        <section class="mail-list-panel" aria-label="邮件列表">
+          <div class="list-tools"><label class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" aria-label="搜索邮件" placeholder="搜索发件人、主题…"></label><div class="filter-row"><button id="filter-all" class="filter active" aria-pressed="true">全部邮件</button><button id="filter-unread" class="filter" aria-pressed="false">未读邮件</button><span id="list-description">按最新时间排序</span></div></div>
+          <div id="message-list" class="message-list" aria-live="polite"></div>
+        </section>
+        <section id="message-detail" class="message-detail" aria-label="邮件详情"><div class="detail-empty"><span class="empty-envelope" aria-hidden="true">✉</span><h2>为下一封来信，留一点空间</h2><p>选择一封邮件，在这里查看完整内容</p></div></section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="compose-dialog" class="compose-dialog">
+    <form id="compose-form">
+      <div class="compose-header"><div><span class="eyebrow">A NEW CONVERSATION</span><h2>写一封邮件</h2></div><button id="close-compose" class="icon-button" type="button" aria-label="关闭写信窗口">×</button></div>
+      <div class="compose-fields"><label for="compose-from">发件人</label><input id="compose-from" type="email" readonly><label for="compose-to">收件人</label><input id="compose-to" type="email" required maxlength="254" placeholder="recipient@example.com"><label for="compose-subject">主题</label><input id="compose-subject" required maxlength="998" placeholder="给这封邮件写个主题"><label class="sr-only" for="compose-text">邮件正文</label><textarea id="compose-text" required maxlength="200000" placeholder="想说的话，从这里开始…"></textarea></div>
+      <div class="compose-footer"><span id="compose-error" class="form-error" role="alert"></span><button id="send-button" class="button primary" type="submit">发送邮件 <span aria-hidden="true">↗</span></button></div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

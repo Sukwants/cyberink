@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.test
+.data/
+.test-data/
+data/
+*.log
+.local-dev-credentials.txt
+.audit.json
+.test-data-audit.json

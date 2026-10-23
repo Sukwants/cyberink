@@ -1,0 +1,37 @@
+{
+  "name": "cyberink",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.19.0",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc && cp src/schema.sql dist/schema.sql",
+    "db:init": "tsx src/cli.ts init",
+    "user:add": "tsx src/cli.ts user"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/static": "^10.1.7",
+    "dotenv": "^17.2.3",
+    "fastify": "^5.6.1",
+    "mailparser": "^3.7.5",
+    "mariadb": "^3.4.5",
+    "nodemailer": "^10.2.1",
+    "smtp-server": "^3.15.0"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^22.18.12",
+    "@types/nodemailer": "^8.0.2",
+    "@types/smtp-server": "^3.5.12",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT"
+}
