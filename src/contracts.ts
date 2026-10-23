@@ -33,5 +33,5 @@ export interface AppConfig {
  domains: string[]; maxMessageBytes: number; storageDir: string;
  db: { host: string; port: number; user: string; password: string; database: string; connectionLimit: number };
  relay: { host: string; port: number; secure: boolean; user?: string; password?: string };
- sessionTtlMs: number; secureCookies: boolean;
+ sessionTtlMs: number; secureCookies: boolean; trustedProxies?: string[];
 }

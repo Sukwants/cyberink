@@ -155,6 +155,7 @@ RELAY_PASSWORD=your-relay-password
 | --- | --- |
 | `NODE_ENV` | 支持 `development`（默认）和 `production`；正式运行使用 `production` |
 | `HOST` | `127.0.0.1`，同时控制 HTTP 和 SMTP 的监听地址 |
+| `TRUST_PROXY` | 默认留空；可信反向代理的 IP，多个地址用英文逗号分隔 |
 | `HTTP_PORT` | `3000` |
 | `SMTP_PORT` | `2525` |
 | `MAIL_DOMAINS` | `example.test`，多个域名以英文逗号分隔 |
@@ -167,6 +168,39 @@ RELAY_PASSWORD=your-relay-password
 | `RELAY_USER` / `RELAY_PASSWORD` | Relay 认证信息 |
 
 `.env` 包含数据库和 Relay 密码，应保存在本机，不要提交到版本库。服务进程需要拥有 `STORAGE_DIR` 的读写权限。
+
+## Nginx HTTPS 反向代理
+
+Nginx 终止 HTTPS、再通过 HTTP 转发到 Cyberink 时，需要将外部协议与访问域名传给应用，并显式配置可信代理。否则浏览器的 Origin 与后端识别的地址不同，登录或修改邮件时会返回“请求来源无效”。
+
+以下示例适用于 Nginx 与 Cyberink 同机运行。在 `.env` 中设置：
+
+```dotenv
+HOST=127.0.0.1
+HTTP_PORT=3000
+TRUST_PROXY=127.0.0.1
+```
+
+在已有的 Nginx HTTPS `server` 中配置：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header Connection "";
+    proxy_next_upstream off;
+}
+```
+
+`$http_host` 保留外部域名及非标准端口，例如 `mail.example.com:8443`。Nginx 应覆盖这些转发头，保留浏览器原始的 Origin 和 CSRF 请求头。
+
+`TRUST_PROXY` 填写 Nginx 连接应用时的源 IP，而非浏览器 IP；支持多个明确的 IPv4 或 IPv6 地址，例如 `127.0.0.1,::1`。Nginx 在其他主机上时，填写对应代理地址，并将应用 HTTP 端口限制为仅允许该代理连接。
+
+更新代码后执行 `pnpm build` 并重启应用；修改 Nginx 配置后，检查配置并重载。生产模式仍需通过 HTTPS 访问，并配置带认证的 TLS Relay。
 
 ## 数据保存与备份
 

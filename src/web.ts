@@ -53,7 +53,7 @@ function safeOrigin(request: FastifyRequest): boolean {
   const origin = request.headers.origin;
   if (!origin) return true;
   try {
-    return new URL(origin).origin === new URL(request.protocol + '://' + request.headers.host).origin;
+    return new URL(origin).origin === new URL(request.protocol + '://' + request.host).origin;
   } catch {
     return false;
   }
@@ -62,6 +62,7 @@ function safeOrigin(request: FastifyRequest): boolean {
 export async function buildWeb({ config, repository, outbound }: WebDependencies): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,
+    trustProxy: config.trustedProxies?.length ? config.trustedProxies : false,
     bodyLimit: Math.min(Math.max(config.maxMessageBytes * 2, 65_536), 10_485_760),
   });
   const sessions = new Map<string, Session>();
