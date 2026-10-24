@@ -10,6 +10,7 @@
   let toastTimer;
   let sessionVersion = 0;
   let listVersion = 0;
+  const folderRevision = { inbox: 0, sent: 0 };
   let detailVersion = 0;
   let composeVersion = 0;
   let attachmentSequence = 0;
@@ -185,10 +186,11 @@
     const version = ++listVersion;
     const session = sessionVersion;
     const folder = state.folder;
+    const revision = folderRevision[folder];
     const button = $("refresh-button"); button.disabled = true;
     try {
       const data = await api(folder === "sent" ? "/api/sent" : "/api/inbox");
-      if (version !== listVersion || session !== sessionVersion || folder !== state.folder || !state.user) return;
+      if (version !== listVersion || session !== sessionVersion || folder !== state.folder || revision !== folderRevision[folder] || !state.user) return;
       state.messages[folder] = data.messages;
       renderMessages();
       if (state.selectedId && !data.messages.some((message) => message.id === state.selectedId)) {
@@ -250,21 +252,27 @@
         }
       });
       left.append(unread);
-      actions.append(actionButton("删除邮件", "delete-button", async (event) => {
-        const button = event.currentTarget; button.disabled = true;
-        try {
-          await api("/api/messages/" + encodeURIComponent(message.id), { method: "DELETE" });
-          if (context.session !== sessionVersion || !state.user) return;
-          state.messages.inbox = state.messages.inbox.filter((entry) => entry.id !== message.id); updateCounts();
-          if (detailIsCurrent(context)) {
-            detailVersion++; state.selectedId = null; state.detail = null; emptyDetail(); renderMessages();
-          }
-          notify("邮件已删除");
-        } catch (error) {
-          if (context.session === sessionVersion) { notify(messageError(error), true); button.disabled = false; }
-        }
-      }));
     }
+    actions.append(actionButton("删除邮件", "delete-button", async (event) => {
+      const button = event.currentTarget; button.disabled = true;
+      try {
+        const path = context.folder === "sent" ? "/api/sent/" : "/api/messages/";
+        await api(path + encodeURIComponent(message.id), { method: "DELETE" });
+        if (context.session !== sessionVersion || !state.user) return;
+        folderRevision[context.folder]++;
+        state.messages[context.folder] = state.messages[context.folder].filter((entry) => entry.id !== message.id);
+        updateCounts();
+        if (state.folder === context.folder) {
+          if (state.selectedId === message.id) {
+            detailVersion++; state.selectedId = null; state.detail = null; emptyDetail();
+          }
+          renderMessages();
+        }
+        notify("邮件已删除");
+      } catch (error) {
+        if (context.session === sessionVersion) { notify(messageError(error), true); button.disabled = false; }
+      }
+    }));
     const senderLine = element("div", "sender-line");
     senderLine.append(element("span", "avatar", sender(message).slice(0, 1).toUpperCase()));
     const info = element("div", "sender-info");

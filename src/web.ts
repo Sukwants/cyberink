@@ -174,6 +174,12 @@ export async function buildWeb({ config, repository, outbound }: WebDependencies
     return { ok: true };
   });
   app.get('/api/sent', async (request) => ({ messages: await repository.listSent(requestUsers.get(request)!.id) }));
+  app.delete<{ Params: { id: string } }>('/api/sent/:id', async (request, reply) => {
+    if (!validId(request.params.id)) return reply.code(400).send({ error: '邮件编号无效' });
+    const changed = await repository.deleteSent(requestUsers.get(request)!.id, request.params.id);
+    if (!changed) return reply.code(404).send({ error: '邮件不存在' });
+    return { ok: true };
+  });
   app.get('/api/inbox', async (request) => ({ messages: await repository.listMessages(requestUsers.get(request)!.id) }));
 
   app.get<{ Params: { id: string } }>('/api/messages/:id', async (request, reply) => {
