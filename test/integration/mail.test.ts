@@ -7,15 +7,16 @@ import { createServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import mariadb from 'mariadb';
 import nodemailer from 'nodemailer';
+import { simpleParser } from 'mailparser';
 import { SMTPServer } from 'smtp-server';
-import { loadConfig } from '../../src/config.js';
+import { loadConfig, buildConfig } from '../../src/config.js';
 import { hashPassword } from '../../src/auth.js';
 import { Repository } from '../../src/repository.js';
 import { MailStore } from '../../src/mail-store.js';
 import { createSmtpServer } from '../../src/smtp.js';
 import { OutboundService } from '../../src/outbound.js';
 import { buildWeb } from '../../src/web.js';
-import type { AppConfig, InboundDelivery, MessageDetail, OutboundStatus, Mailbox } from '../../src/contracts.js';
+import type { AppConfig, InboundDelivery, MessageDetail, OutboundStatus, Mailbox, OutboundRecord, OutboundSummary } from '../../src/contracts.js';
 
 async function listenSmtp(server: SMTPServer, port = 0) {
  await new Promise<void>((resolve,reject)=>{ server.once('error',reject); server.listen(port,'127.0.0.1',()=>{server.off('error',reject);resolve();}); });
@@ -79,7 +80,7 @@ test('WSL real MariaDB + SMTP + HTTP end-to-end', {timeout:90_000}, async t=>{
  async function startServices() {
   smtp=createSmtpServer({repository,store:new MailStore(config.storageDir,repository),domains:config.domains,maxMessageBytes:config.maxMessageBytes});
   smtpPort=await listenSmtp(smtp,config.smtpPort);
-  web=await buildWeb({config,repository,outbound:new OutboundService(repository,config.relay)});
+  web=await buildWeb({config,repository,outbound:new OutboundService(repository,config.relay,undefined,{storageDir:config.storageDir,maxMessageBytes:config.maxMessageBytes,maxAttachments:config.maxAttachments,maxAttachmentBytes:config.maxAttachmentBytes})});
   httpBase=await web.listen({host:'127.0.0.1',port:0});
  }
  try {
@@ -193,7 +194,7 @@ test('WSL real MariaDB + SMTP + HTTP end-to-end', {timeout:90_000}, async t=>{
   await t.test('real local reverse proxy accepts forwarded HTTPS origin and persists protected mutations',async()=>{
    const proxied=await buildWeb({
     config:{...config,trustedProxies:['127.0.0.1'],secureCookies:true},
-    repository,outbound:new OutboundService(repository,config.relay)
+    repository,outbound:new OutboundService(repository,config.relay,undefined,{storageDir:config.storageDir,maxMessageBytes:config.maxMessageBytes,maxAttachments:config.maxAttachments,maxAttachmentBytes:config.maxAttachmentBytes})
    });
    const upstream=new URL(await proxied.listen({host:'127.0.0.1',port:0}));
    const externalHost='mail.example.test:8443';
@@ -269,6 +270,164 @@ test('WSL real MariaDB + SMTP + HTTP end-to-end', {timeout:90_000}, async t=>{
    assert.equal((await repository.getOutbound(aliceId,record.id))!.status,'sent');
    assert.equal((await request('/api/outbound/'+record.id,'GET',undefined,'bob')).status,404);
   });
+  await t.test('multipart attachments arrive intact at local relay and appear in owner-only sent list and details',async()=>{
+   const bytes=Buffer.from([0,1,2,127,128,254,255,10,13,42]);
+   const form=new FormData();
+   // File parts may precede fields.
+   form.append('attachments',new Blob([bytes],{type:'application/octet-stream'}),'报告.bin');
+   form.append('attachments',new Blob([],{type:'text/plain'}),'empty.txt');
+   form.append('from',email);form.append('to',JSON.stringify(['recipient@external.test']));
+   form.append('subject','With attachments 中文');form.append('text','Multipart body 正文');
+   const auth=session.get('alice')!;
+   const before=captured.length;
+   const response=await fetch(httpBase+'/api/send',{method:'POST',headers:{cookie:auth.cookie,'x-csrf-token':auth.csrfToken},body:form});
+   assert.equal(response.status,201);
+   const record=await response.json() as OutboundRecord;
+   assert.equal(record.status,'sent');
+   assert.equal(record.attachments.length,2);
+   assert.ok(record.createdAt);
+   assert.equal(captured.length,before+1);
+   const mime=await simpleParser(captured.at(-1)!);
+   assert.equal(mime.subject,'With attachments 中文');
+   assert.match(mime.text!,/Multipart body 正文/);
+   assert.deepEqual(mime.attachments.find(a=>a.filename==='报告.bin')!.content,bytes);
+   assert.equal(mime.attachments.find(a=>a.filename==='empty.txt')!.content.length,0);
+   const sent=await (await request('/api/sent')).json() as {messages:OutboundSummary[]};
+   assert.ok(sent.messages.some(m=>m.id===record.id));
+   assert.ok(sent.messages.every(m=>m.status==='sent' && m.userId===aliceId));
+   assert.equal((await request('/api/sent','GET',undefined,'none')).status,401);
+   const other=await (await request('/api/sent','GET',undefined,'bob')).json() as {messages:OutboundSummary[]};
+   assert.equal(other.messages.some(m=>m.id===record.id),false);
+   const detail=await (await request('/api/outbound/'+record.id)).json() as {message:OutboundRecord};
+   assert.equal(detail.message.text,'Multipart body 正文');
+   assert.equal((await request('/api/outbound/'+record.id,'GET',undefined,'bob')).status,404);
+   for(const attachment of detail.message.attachments) {
+    assert.equal('path' in attachment,false);assert.equal('content' in attachment,false);
+    const download=await request('/api/outbound/attachments/'+attachment.id);
+    assert.equal(download.status,200);
+    assert.match(download.headers.get('content-disposition')!,/^attachment;/);
+    const actual=Buffer.from(await download.arrayBuffer());
+    assert.deepEqual(actual,attachment.filename==='报告.bin'?bytes:Buffer.alloc(0));
+    assert.equal((await request('/api/outbound/attachments/'+attachment.id,'GET',undefined,'bob')).status,404);
+    assert.equal((await request('/api/outbound/attachments/'+attachment.id,'GET',undefined,'none')).status,401);
+    const rows=await inspect.query('SELECT storage_path FROM outbound_attachments WHERE id=?',[attachment.id]);
+    assert.deepEqual(await readFile(rows[0].storage_path),actual);
+    assert.equal((await stat(rows[0].storage_path)).mode & 0o777,0o600);
+   }
+   // Reinitialization adds missing tables without replacing existing messages.
+   const fresh=new Repository(config.db);
+   try {
+    await fresh.initialize();
+    assert.equal((await fresh.getOutbound(aliceId,record.id))!.attachments.length,2);
+    assert.ok((await fresh.listSent(aliceId)).some(m=>m.id===record.id));
+   } finally {await fresh.close();}
+   await web!.close();web=undefined;
+   web=await buildWeb({config,repository,outbound:new OutboundService(repository,config.relay,undefined,{storageDir:config.storageDir,maxMessageBytes:config.maxMessageBytes,maxAttachments:config.maxAttachments,maxAttachmentBytes:config.maxAttachmentBytes})});
+   httpBase=await web.listen({host:'127.0.0.1',port:0});
+   session.clear();await login('alice',email);await login('bob',bobEmail);
+   assert.equal((await request('/api/outbound/'+record.id)).status,200);
+   assert.equal((await request('/api/outbound/attachments/'+record.attachments[0].id)).status,200);
+  });
+  await t.test('multipart authorization, CSRF, file count and encoded MIME limits prevent delivery',async()=>{
+   const auth=session.get('alice')!;
+   const before=await inspect.query('SELECT COUNT(*) AS n FROM outbound_messages WHERE user_id=?',[aliceId]);
+   const connections=relayConnections;
+   function form(fileCount=1,bytes=Buffer.from('small'),from=email) {
+    const body=new FormData();
+    body.append('from',from);body.append('to',JSON.stringify(['recipient@external.test']));
+    body.append('subject','Rejected upload');body.append('text','Not delivered');
+    for(let i=0;i<fileCount;i++) body.append('attachments',new Blob([bytes]),'file-'+i+'.bin');
+    return body;
+   }
+   const headers={cookie:auth.cookie,'x-csrf-token':auth.csrfToken};
+   assert.equal((await fetch(httpBase+'/api/send',{method:'POST',headers:{cookie:auth.cookie},body:form()})).status,403);
+   assert.equal((await fetch(httpBase+'/api/send',{method:'POST',headers:{...headers,origin:'https://attacker.test'},body:form()})).status,403);
+   assert.equal((await fetch(httpBase+'/api/send',{method:'POST',headers,body:form(1,Buffer.from('small'),bobEmail)})).status,403);
+   assert.equal((await fetch(httpBase+'/api/send',{method:'POST',headers,body:form(11)})).status,413);
+   assert.equal((await fetch(httpBase+'/api/send',{method:'POST',headers,body:form(1,Buffer.alloc(config.maxMessageBytes+1))})).status,413);
+   // Raw upload fits, base64 MIME encoding does not.
+   assert.equal((await fetch(httpBase+'/api/send',{method:'POST',headers,body:form(1,Buffer.alloc(Math.floor(config.maxMessageBytes*0.8)))})).status,413);
+   const wrongField=new FormData();wrongField.append('path','/etc/passwd');
+   assert.equal((await fetch(httpBase+'/api/send',{method:'POST',headers,body:wrongField})).status,400);
+   assert.equal((await request('/api/send','POST',{from:email,to:['recipient@external.test'],subject:'No paths',text:'No paths',attachments:[{path:'/etc/passwd'}]})).status,400);
+   const after=await inspect.query('SELECT COUNT(*) AS n FROM outbound_messages WHERE user_id=?',[aliceId]);
+   assert.equal(String(after[0].n),String(before[0].n));
+   assert.equal(relayConnections,connections);
+  });
+  await t.test('failed attachment sends retain private records but never enter successful sent list',async()=>{
+   const form=new FormData();
+   form.append('from',email);form.append('to',JSON.stringify(['recipient@external.test']));
+   form.append('subject','Rejected attachment');form.append('text','Relay failure');
+   form.append('attachments',new Blob(['retain private bytes']),'retained.txt');
+   relayMode='permanent';
+   let record:OutboundRecord;
+   try {
+    const auth=session.get('alice')!;
+    const response=await fetch(httpBase+'/api/send',{method:'POST',headers:{cookie:auth.cookie,'x-csrf-token':auth.csrfToken},body:form});
+    assert.equal(response.status,201);
+    record=await response.json() as OutboundRecord;
+    assert.equal(record.status,'permanent_failed');
+   } finally {relayMode='ok';}
+   assert.equal((await repository.getOutbound(aliceId,record.id))!.status,'permanent_failed');
+   const sent=await (await request('/api/sent')).json() as {messages:OutboundSummary[]};
+   assert.equal(sent.messages.some(m=>m.id===record.id),false);
+   const download=await request('/api/outbound/attachments/'+record.attachments[0].id);
+   assert.equal(await download.text(),'retain private bytes');
+  });
+  await t.test('configured count and per-file limits govern HTTP uploads, transport and exposed UI limits',async()=>{
+   for(const maxAttachments of [2,0]) {
+    const custom=buildConfig({...process.env,MAX_ATTACHMENTS:String(maxAttachments),MAX_ATTACHMENT_BYTES:'8',
+     STORAGE_DIR:config.storageDir,RELAY_PORT:String(config.relay.port)});
+    const app=await buildWeb({config:custom,repository,outbound:new OutboundService(repository,custom.relay,undefined,{
+     storageDir:custom.storageDir,maxMessageBytes:custom.maxMessageBytes,maxAttachments:custom.maxAttachments,maxAttachmentBytes:custom.maxAttachmentBytes})});
+    try {
+     const base=await app.listen({host:'127.0.0.1',port:0});
+     const loginResponse=await fetch(base+'/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email,password})});
+     assert.equal(loginResponse.status,200);
+     const data=await loginResponse.json() as {csrfToken:string;limits:{maxAttachments:number;maxAttachmentBytes:number;maxMessageBytes:number}};
+     assert.deepEqual(data.limits,{maxAttachments,maxAttachmentBytes:8,maxMessageBytes:config.maxMessageBytes});
+     const headers={cookie:loginResponse.headers.get('set-cookie')!.split(';')[0],'x-csrf-token':data.csrfToken};
+     const me=await (await fetch(base+'/api/me',{headers})).json() as {limits:unknown};
+     assert.deepEqual(me.limits,data.limits);
+     const form=(count:number,bytes:number)=>{
+      const body=new FormData();
+      body.append('from',email);body.append('to',JSON.stringify(['recipient@external.test']));
+      body.append('subject','Configured attachments');body.append('text','Limits');
+      for(let i=0;i<count;i++) body.append('attachments',new Blob([Buffer.alloc(bytes,42)]),'file-'+i+'.bin');
+      return body;
+     };
+     const before=captured.length;
+     if(maxAttachments>0) {
+      const result=await fetch(base+'/api/send',{method:'POST',headers,body:form(2,8)});
+      assert.equal(result.status,201);
+      const sent=await result.json() as OutboundRecord;
+      assert.equal(sent.status,'sent');assert.deepEqual(sent.attachments.map(a=>a.size),[8,8]);
+      assert.equal(captured.length,before+1);
+      const mime=await simpleParser(captured.at(-1)!);
+      assert.equal(mime.attachments.length,2);
+      assert.ok(mime.attachments.every(a=>a.content.equals(Buffer.alloc(8,42))));
+     } else {
+      const result=await fetch(base+'/api/send',{method:'POST',headers:{...headers,'content-type':'application/json'},body:JSON.stringify({from:email,to:['recipient@external.test'],subject:'Text only',text:'Attachments disabled'})});
+      assert.equal(result.status,201);assert.equal((await result.json() as OutboundRecord).status,'sent');
+     }
+     const records=await inspect.query('SELECT COUNT(*) AS n FROM outbound_messages WHERE user_id=?',[aliceId]);
+     const calls=relayConnections;
+     assert.equal((await fetch(base+'/api/send',{method:'POST',headers,body:form(maxAttachments+1,1)})).status,413);
+     assert.equal((await fetch(base+'/api/send',{method:'POST',headers,body:form(1,9)})).status,413);
+     const after=await inspect.query('SELECT COUNT(*) AS n FROM outbound_messages WHERE user_id=?',[aliceId]);
+     assert.equal(String(after[0].n),String(records[0].n));assert.equal(relayConnections,calls);
+    } finally {await app.close();}
+   }
+  });
+  await t.test('legacy outbound rows remain readable without attachment metadata',async()=>{
+   const id=randomUUID();
+   await inspect.query('INSERT INTO outbound_messages (id,user_id,from_address,to_addresses,subject,text_body,status,error_message) VALUES (?,?,?,?,?,?,?,?)',
+    [id,aliceId,email,JSON.stringify(['recipient@external.test']),'Legacy sent mail','Preserved text','sent',null]);
+   await repository.initialize();
+   const old=await repository.getOutbound(aliceId,id);
+   assert.equal(old!.text,'Preserved text');assert.deepEqual(old!.attachments,[]);
+   assert.ok((await repository.listSent(aliceId)).some(m=>m.id===id));
+  });
   await t.test('local SMTP 451/550 failures persist distinct failed statuses, never sent',async()=>{
    for(const [mode,status] of [['temporary','temp_failed'],['permanent','permanent_failed']] as const) {
     relayMode=mode;
@@ -310,7 +469,7 @@ test('WSL real MariaDB + SMTP + HTTP end-to-end', {timeout:90_000}, async t=>{
    const rows=await inspect.query('SELECT is_deleted FROM messages WHERE id=?',[received.id]);
    assert.equal(Boolean(rows[0].is_deleted),true);
    await web!.close();web=undefined;
-   web=await buildWeb({config,repository,outbound:new OutboundService(repository,config.relay)});
+   web=await buildWeb({config,repository,outbound:new OutboundService(repository,config.relay,undefined,{storageDir:config.storageDir,maxMessageBytes:config.maxMessageBytes,maxAttachments:config.maxAttachments,maxAttachmentBytes:config.maxAttachmentBytes})});
    httpBase=await web.listen({host:'127.0.0.1',port:0});
    session.clear();await login('alice',email);
    assert.equal((await request('/api/messages/'+received.id)).status,404);

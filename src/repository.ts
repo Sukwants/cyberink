@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import mariadb, { type Pool } from 'mariadb';
 import type {
   AppConfig, AttachmentInfo, AttachmentRecord, Mailbox, MailRepository, MessageDetail,
-  MessageSummary, OutboundRecord, OutboundStatus, StoredMessage, User,
+  MessageSummary, OutboundRecord, OutboundStatus, OutboundSummary, StoredMessage, User,
 } from './contracts.js';
 
 interface UserRow { id: number; email: string; password_hash: string }
@@ -12,10 +12,11 @@ interface MessageRow {
   created_at: Date; is_read: number; text_body?: string;
 }
 interface AttachmentRow { id: string; filename: string; content_type: string; byte_size: number; storage_path: string }
-interface OutboundRow {
+interface OutboundSummaryRow {
   id: string; user_id: number; from_address: string; to_addresses: string | string[];
-  subject: string; text_body: string; status: OutboundStatus; error_message: string | null;
+  subject: string; status: OutboundStatus; error_message: string | null; created_at: Date;
 }
+interface OutboundRow extends OutboundSummaryRow { text_body: string }
 interface ChangeResult { affectedRows: number; insertId: number | bigint }
 
 function userFromRow(row: UserRow): User {
@@ -37,11 +38,20 @@ function attachmentFromRow(row: AttachmentRow): AttachmentRecord {
   };
 }
 
+function outboundSummaryFromRow(row: OutboundSummaryRow): OutboundSummary {
+  return {
+    id: row.id, userId: row.user_id, from: row.from_address,
+    to: typeof row.to_addresses === 'string' ? JSON.parse(row.to_addresses) as string[] : row.to_addresses,
+    subject: row.subject, status: row.status, error: row.error_message,
+    createdAt: new Date(row.created_at).toISOString(),
+  };
+}
+
 export class PersistenceUncertainError extends Error {
   readonly persistenceUncertain = true;
 
   constructor(cause: unknown) {
-    super('Database commit outcome is unknown; retain received mail files for reconciliation', { cause });
+    super('Database commit outcome is unknown; retain mail files for reconciliation', { cause });
     this.name = 'PersistenceUncertainError';
   }
 }
@@ -184,11 +194,53 @@ export class Repository implements MailRepository {
     return rows[0] ? attachmentFromRow(rows[0]) : undefined;
   }
 
-  async createOutbound(record: OutboundRecord): Promise<void> {
-    await this.pool.query(
-      'INSERT INTO outbound_messages (id, user_id, from_address, to_addresses, subject, text_body, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [record.id, record.userId, record.from, JSON.stringify(record.to), record.subject, record.text, record.status, record.error],
+  async createOutbound(record: OutboundRecord, attachments: AttachmentRecord[] = []): Promise<void> {
+    const connection = await this.pool.getConnection();
+    let commitAttempted = false;
+    try {
+      await connection.beginTransaction();
+      await connection.query(
+        'INSERT INTO outbound_messages (id, user_id, from_address, to_addresses, subject, text_body, status, error_message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [record.id, record.userId, record.from, JSON.stringify(record.to), record.subject, record.text, record.status, record.error, new Date(record.createdAt)],
+      );
+      for (const attachment of attachments) {
+        await connection.query(
+          'INSERT INTO outbound_attachments (id, outbound_id, filename, content_type, byte_size, storage_path) VALUES (?, ?, ?, ?, ?, ?)',
+          [attachment.id, record.id, attachment.filename, attachment.contentType, attachment.size, attachment.path],
+        );
+      }
+      commitAttempted = true;
+      await connection.commit();
+    } catch (error) {
+      if (commitAttempted) throw new PersistenceUncertainError(error);
+      try { await connection.rollback(); }
+      catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], 'Outbound transaction and rollback failed', { cause: rollbackError });
+      }
+      throw error;
+    } finally {
+      try { await connection.release(); }
+      catch {
+        // Pool cleanup must not replace the transaction outcome.
+        connection.destroy();
+      }
+    }
+  }
+
+  async listSent(userId: number): Promise<OutboundSummary[]> {
+    const rows = await this.pool.query<OutboundSummaryRow[]>(
+      "SELECT id, user_id, from_address, to_addresses, subject, status, error_message, created_at FROM outbound_messages WHERE user_id = ? AND status = 'sent' ORDER BY created_at DESC, id DESC",
+      [userId],
     );
+    return rows.map(outboundSummaryFromRow);
+  }
+
+  async getOutboundAttachment(userId: number, id: string): Promise<AttachmentRecord | undefined> {
+    const rows = await this.pool.query<AttachmentRow[]>(
+      'SELECT a.id, a.filename, a.content_type, a.byte_size, a.storage_path FROM outbound_attachments a JOIN outbound_messages m ON m.id = a.outbound_id WHERE m.user_id = ? AND a.id = ?',
+      [userId, id],
+    );
+    return rows[0] ? attachmentFromRow(rows[0]) : undefined;
   }
 
   async setOutboundStatus(id: string, userId: number, status: OutboundStatus, error?: string): Promise<void> {
@@ -203,15 +255,21 @@ export class Repository implements MailRepository {
 
   async getOutbound(userId: number, id: string): Promise<OutboundRecord | undefined> {
     const rows = await this.pool.query<OutboundRow[]>(
-      'SELECT id, user_id, from_address, to_addresses, subject, text_body, status, error_message FROM outbound_messages WHERE user_id = ? AND id = ?',
+      'SELECT id, user_id, from_address, to_addresses, subject, text_body, status, error_message, created_at FROM outbound_messages WHERE user_id = ? AND id = ?',
       [userId, id],
     );
     const row = rows[0];
     if (!row) return undefined;
+    const attachments = await this.pool.query<AttachmentRow[]>(
+      'SELECT id, filename, content_type, byte_size, storage_path FROM outbound_attachments WHERE outbound_id = ? ORDER BY id',
+      [id],
+    );
     return {
-      id: row.id, userId: row.user_id, from: row.from_address,
-      to: typeof row.to_addresses === 'string' ? JSON.parse(row.to_addresses) as string[] : row.to_addresses,
-      subject: row.subject, text: row.text_body, status: row.status, error: row.error_message,
+      ...outboundSummaryFromRow(row),
+      text: row.text_body,
+      attachments: attachments.map((attachment) => ({
+        id: attachment.id, filename: attachment.filename, contentType: attachment.content_type, size: attachment.byte_size,
+      })),
     };
   }
 }

@@ -7,7 +7,7 @@ import { buildWeb } from './web.js';
 const config = loadConfig();
 const repository = new Repository(config.db);
 const smtp = createSmtpServer({repository,store: new MailStore(config.storageDir,repository),domains:config.domains,maxMessageBytes:config.maxMessageBytes});
-const web = await buildWeb({config,repository,outbound:new OutboundService(repository,config.relay)});
+const web = await buildWeb({config,repository,outbound:new OutboundService(repository,config.relay,undefined,{storageDir:config.storageDir,maxMessageBytes:config.maxMessageBytes,maxAttachments:config.maxAttachments,maxAttachmentBytes:config.maxAttachmentBytes})});
 let stopping = false;
 async function stop() {
  if (stopping) return;

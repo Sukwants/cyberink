@@ -28,3 +28,21 @@ test('proxy trust is opt-in and accepts only explicit proxy IP addresses',()=>{
   assert.throws(()=>buildConfig({...testEnv,TRUST_PROXY:address}),/TRUST_PROXY/);
  }
 });
+
+test('attachment limits default safely and can be configured independently',()=>{
+ const defaults=buildConfig(testEnv);
+ assert.equal(defaults.maxAttachments,10);
+ assert.equal(defaults.maxAttachmentBytes,defaults.maxMessageBytes);
+ const custom=buildConfig({...testEnv,MAX_MESSAGE_BYTES:'65536',MAX_ATTACHMENTS:'20',MAX_ATTACHMENT_BYTES:'4096'});
+ assert.equal(custom.maxMessageBytes,65536);
+ assert.equal(custom.maxAttachments,20);
+ assert.equal(custom.maxAttachmentBytes,4096);
+ assert.equal(buildConfig({...testEnv,MAX_ATTACHMENTS:'0'}).maxAttachments,0);
+ assert.equal(buildConfig({...testEnv,MAX_MESSAGE_BYTES:'65536'}).maxAttachmentBytes,65536);
+ for(const value of ['-1','1.5','1001','NaN','Infinity','']) {
+  assert.throws(()=>buildConfig({...testEnv,MAX_ATTACHMENTS:value}),/MAX_ATTACHMENTS/);
+ }
+ for(const value of ['0','-1','1.5','65537','NaN','Infinity','']) {
+  assert.throws(()=>buildConfig({...testEnv,MAX_MESSAGE_BYTES:'65536',MAX_ATTACHMENT_BYTES:value}),/MAX_ATTACHMENT_BYTES/);
+ }
+});

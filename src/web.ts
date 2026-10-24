@@ -1,13 +1,14 @@
-import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyReply } from 'fastify';
 import cookie from '@fastify/cookie';
 import staticFiles from '@fastify/static';
+import multipart from '@fastify/multipart';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hashPassword, verifyPassword } from './auth.js';
-import type { AppConfig, MailRepository, OutboundSender, User } from './contracts.js';
+import type { AppConfig, AttachmentRecord, MailRepository, OutboundSender, SendAttachment, User } from './contracts.js';
 
 interface WebDependencies {
   config: AppConfig;
@@ -65,6 +66,7 @@ export async function buildWeb({ config, repository, outbound }: WebDependencies
     trustProxy: config.trustedProxies?.length ? config.trustedProxies : false,
     bodyLimit: Math.min(Math.max(config.maxMessageBytes * 2, 65_536), 10_485_760),
   });
+  const limits = {maxMessageBytes: config.maxMessageBytes, maxAttachments: config.maxAttachments, maxAttachmentBytes: config.maxAttachmentBytes};
   const sessions = new Map<string, Session>();
   const attempts = new Map<string, LoginAttempts>();
   const requestSessions = new WeakMap<FastifyRequest, Session>();
@@ -85,6 +87,10 @@ export async function buildWeb({ config, repository, outbound }: WebDependencies
   app.addHook('onClose', async () => { clearInterval(cleanup); sessions.clear(); attempts.clear(); });
 
   await app.register(cookie);
+  await app.register(multipart, {
+    limits: {fileSize: config.maxAttachmentBytes, files: config.maxAttachments,
+      fields: 4, parts: config.maxAttachments + 4, fieldNameSize: 32, fieldSize: 800_000},
+  });
   app.addHook('onRequest', async (request, reply) => {
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'DENY');
@@ -153,13 +159,13 @@ export async function buildWeb({ config, repository, outbound }: WebDependencies
     const session: Session = { userId: user.id, expiresAt: now + config.sessionTtlMs, csrfToken: randomBytes(32).toString('hex') };
     sessions.set(id, session);
     reply.setCookie(SESSION_COOKIE, id, { ...cookieOptions, maxAge: Math.floor(config.sessionTtlMs / 1000) });
-    return { user: { id: user.id, email: user.email, mailboxes: mailboxes.map(({ id: mailboxId, address }) => ({ id: mailboxId, address })) }, csrfToken: session.csrfToken };
+    return { user: { id: user.id, email: user.email, mailboxes: mailboxes.map(({ id: mailboxId, address }) => ({ id: mailboxId, address })) }, csrfToken: session.csrfToken, limits };
   });
 
   app.get('/api/me', async (request) => {
     const user = requestUsers.get(request)!;
     const mailboxes = await repository.listMailboxes(user.id);
-    return { user: { id: user.id, email: user.email, mailboxes: mailboxes.map(({ id, address }) => ({ id, address })) }, csrfToken: requestSessions.get(request)!.csrfToken };
+    return { user: { id: user.id, email: user.email, mailboxes: mailboxes.map(({ id, address }) => ({ id, address })) }, csrfToken: requestSessions.get(request)!.csrfToken, limits };
   });
   app.post('/api/logout', async (request, reply) => {
     const id = request.cookies[SESSION_COOKIE];
@@ -167,6 +173,7 @@ export async function buildWeb({ config, repository, outbound }: WebDependencies
     reply.clearCookie(SESSION_COOKIE, cookieOptions);
     return { ok: true };
   });
+  app.get('/api/sent', async (request) => ({ messages: await repository.listSent(requestUsers.get(request)!.id) }));
   app.get('/api/inbox', async (request) => ({ messages: await repository.listMessages(requestUsers.get(request)!.id) }));
 
   app.get<{ Params: { id: string } }>('/api/messages/:id', async (request, reply) => {
@@ -190,9 +197,7 @@ export async function buildWeb({ config, repository, outbound }: WebDependencies
     if (!changed) return reply.code(404).send({ error: '邮件不存在' });
     return { ok: true };
   });
-  app.get<{ Params: { id: string } }>('/api/attachments/:id', async (request, reply) => {
-    if (!validId(request.params.id)) return reply.code(400).send({ error: '附件编号无效' });
-    const attachment = await repository.getAttachment(requestUsers.get(request)!.id, request.params.id);
+  async function downloadAttachment(attachment: AttachmentRecord | undefined, reply: FastifyReply) {
     if (!attachment) return reply.code(404).send({ error: '附件不存在' });
     try {
       const [root, attachmentPath] = await Promise.all([realpath(config.storageDir), realpath(attachment.path)]);
@@ -205,10 +210,44 @@ export async function buildWeb({ config, repository, outbound }: WebDependencies
       if (isObject(error) && error.code === 'ENOENT') return reply.code(404).send({ error: '附件文件不存在' });
       throw error;
     }
+  }
+  app.get<{ Params: { id: string } }>('/api/attachments/:id', async (request, reply) => {
+    if (!validId(request.params.id)) return reply.code(400).send({ error: '附件编号无效' });
+    return downloadAttachment(await repository.getAttachment(requestUsers.get(request)!.id, request.params.id), reply);
+  });
+  app.get<{ Params: { id: string } }>('/api/outbound/attachments/:id', async (request, reply) => {
+    if (!validId(request.params.id)) return reply.code(400).send({ error: '附件编号无效' });
+    return downloadAttachment(await repository.getOutboundAttachment(requestUsers.get(request)!.id, request.params.id), reply);
   });
 
   app.post('/api/send', async (request, reply) => {
-    const body = request.body;
+    let body: unknown = request.body;
+    const attachments: SendAttachment[] = [];
+    if (request.isMultipart()) {
+      const fields: Record<string, unknown> = {};
+      let total = 0;
+      for await (const part of request.parts()) {
+        if (part.type === 'file') {
+          if (part.fieldname !== 'attachments') return reply.code(400).send({error: '附件字段无效'});
+          const content = await part.toBuffer();
+          total += content.length;
+          attachments.push({filename: part.filename, contentType: part.mimetype, content});
+        } else {
+          if (!['from','to','subject','text'].includes(part.fieldname) || Object.hasOwn(fields,part.fieldname)
+            || part.valueTruncated || part.fieldnameTruncated || typeof part.value !== 'string') {
+            return reply.code(400).send({error: '发件字段无效或超过限制'});
+          }
+          fields[part.fieldname] = part.value;
+          total += Buffer.byteLength(part.value);
+        }
+        if (total > config.maxMessageBytes) return reply.code(413).send({error: '邮件内容和附件超过大小限制'});
+      }
+      if (typeof fields.to === 'string' && fields.to.startsWith('[')) {
+        try { fields.to = JSON.parse(fields.to); }
+        catch { return reply.code(400).send({error: '收件人格式无效'}); }
+      }
+      body = fields;
+    }
     if (!isObject(body) || !onlyKeys(body, ['from', 'to', 'subject', 'text']) || !isEmail(body.from) || typeof body.subject !== 'string' || body.subject.length > 998 || /[\r\n]/.test(body.subject) || typeof body.text !== 'string' || body.text.length > 200_000) {
       return reply.code(400).send({ error: '发件内容格式无效' });
     }
@@ -218,7 +257,7 @@ export async function buildWeb({ config, repository, outbound }: WebDependencies
     const mailboxes = await repository.listMailboxes(user.id);
     const from = body.from.toLowerCase();
     if (!mailboxes.some((mailbox) => mailbox.address.toLowerCase() === from)) return reply.code(403).send({ error: '无权使用此发件人地址' });
-    const record = await outbound.send(user.id, { from, to: [...new Set(recipients.map((address) => (address as string).toLowerCase()))], subject: body.subject, text: body.text });
+    const record = await outbound.send(user.id, { from, to: [...new Set(recipients.map((address) => (address as string).toLowerCase()))], subject: body.subject, text: body.text, attachments });
     return reply.code(201).send(record);
   });
   app.get<{ Params: { id: string } }>('/api/outbound/:id', async (request, reply) => {

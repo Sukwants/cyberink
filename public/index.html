@@ -39,11 +39,12 @@
       <a class="app-brand" href="/" aria-label="Cyberink 首页"><span class="brand-icon" aria-hidden="true">C</span><span>Cyberink</span></a>
       <button id="compose-button" class="button primary compose-button"><span aria-hidden="true">＋</span> 写邮件</button>
       <p class="nav-caption">我的邮箱</p>
-      <button id="inbox-nav" class="nav-item active"><span class="nav-icon" aria-hidden="true">▣</span> 收件箱 <span id="unread-badge" class="count-badge">0</span></button>
+      <button id="inbox-nav" class="nav-item active" aria-pressed="true" title="收件箱"><span class="nav-icon" aria-hidden="true">▣</span> 收件箱 <span id="unread-badge" class="count-badge">0</span></button>
+      <button id="sent-nav" class="nav-item" aria-pressed="false" title="已发送"><span class="nav-icon" aria-hidden="true">↗</span> 已发送 <span id="sent-badge" class="count-badge" hidden>0</span></button>
       <div class="sidebar-bottom"><span class="avatar" id="user-avatar" aria-hidden="true">C</span><div class="account"><strong id="user-name"></strong><span id="user-email"></span></div><button id="logout-button" class="icon-button" title="退出登录" aria-label="退出登录">↪</button></div>
     </aside>
     <main class="mail-main">
-      <header class="topbar"><div><span class="eyebrow">YOUR DAILY CORRESPONDENCE</span><h1>收件箱 <span id="total-count">0</span></h1></div><div class="topbar-actions"><span id="connection-state" class="connection"><i></i> 已连接</span><button id="refresh-button" class="icon-button refresh-button" title="刷新收件箱" aria-label="刷新收件箱">↻</button></div></header>
+      <header class="topbar"><div><span class="eyebrow">YOUR DAILY CORRESPONDENCE</span><h1><span id="folder-title">收件箱</span> <span id="total-count">0</span></h1></div><div class="topbar-actions"><span id="connection-state" class="connection"><i></i> 已连接</span><button id="refresh-button" class="icon-button refresh-button" title="刷新邮件列表" aria-label="刷新邮件列表">↻</button></div></header>
       <div class="mail-workspace">
         <section class="mail-list-panel" aria-label="邮件列表">
           <div class="list-tools"><label class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" aria-label="搜索邮件" placeholder="搜索发件人、主题…"></label><div class="filter-row"><button id="filter-all" class="filter active" aria-pressed="true">全部邮件</button><button id="filter-unread" class="filter" aria-pressed="false">未读邮件</button><span id="list-description">按最新时间排序</span></div></div>
@@ -58,6 +59,8 @@
     <form id="compose-form">
       <div class="compose-header"><div><span class="eyebrow">A NEW CONVERSATION</span><h2>写一封邮件</h2></div><button id="close-compose" class="icon-button" type="button" aria-label="关闭写信窗口">×</button></div>
       <div class="compose-fields"><label for="compose-from">发件人</label><input id="compose-from" type="email" readonly><label for="compose-to">收件人</label><input id="compose-to" type="email" required maxlength="254" placeholder="recipient@example.com"><label for="compose-subject">主题</label><input id="compose-subject" required maxlength="998" placeholder="给这封邮件写个主题"><label class="sr-only" for="compose-text">邮件正文</label><textarea id="compose-text" required maxlength="200000" placeholder="想说的话，从这里开始…"></textarea></div>
+      <section class="compose-attachments" aria-label="发送附件"><div class="attachment-toolbar"><button id="add-attachments" class="button attachment-picker" type="button">＋ 添加附件</button><span id="attachment-total"></span></div><input id="compose-attachments" type="file" multiple hidden><p id="attachment-limits" class="attachment-limits"></p><ul id="compose-attachment-list" class="compose-attachment-list" aria-live="polite"></ul><p id="attachment-warning" class="form-error" role="alert"></p></section>
+      <div id="compose-status-actions" class="compose-status-actions" hidden><button id="check-send-status" class="button secondary" type="button">核查发送状态</button><button id="new-compose" class="button secondary" type="button">另写一封</button></div>
       <div class="compose-footer"><span id="compose-error" class="form-error" role="alert"></span><button id="send-button" class="button primary" type="submit">发送邮件 <span aria-hidden="true">↗</span></button></div>
     </form>
   </dialog>

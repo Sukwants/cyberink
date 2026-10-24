@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
+    "@fastify/multipart": "^10.1.6",
     "@fastify/static": "^10.1.7",
     "dotenv": "^17.2.3",
     "fastify": "^5.6.1",

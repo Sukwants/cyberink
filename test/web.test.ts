@@ -34,11 +34,11 @@ test('Web sessions reject cross-site changes and enforce mailbox ownership', asy
     setRead: async (id, messageId, isRead) => { if (id !== user.id || messageId !== message.id || deleted) return false; message.isRead = isRead; return true; },
     deleteMessage: async (id, messageId) => { if (id !== user.id || messageId !== message.id || deleted) return false; deleted = true; return true; },
     getAttachment: async (id, attachmentId) => id !== user.id || deleted ? undefined : attachmentId === 'attachment-one' ? { ...message.attachments[0], path: attachmentPath } : attachmentId === 'attachment-outside' ? { ...message.attachments[0], path: outsidePath } : undefined,
-    createOutbound: async () => {}, setOutboundStatus: async () => {}, getOutbound: async () => undefined,
+    createOutbound: async () => {}, listSent: async () => [], getOutboundAttachment: async () => undefined, setOutboundStatus: async () => {}, getOutbound: async () => undefined,
   };
-  const outbound: OutboundSender = { send: async (userId, input) => { sends++; return { id: 'outbound-one', userId, ...input, status: 'sent', error: null }; } };
+  const outbound: OutboundSender = { send: async (userId, input) => { sends++; return { id: 'outbound-one', userId, ...input, attachments: [], createdAt: new Date().toISOString(), status: 'sent', error: null }; } };
   const config: AppConfig = {
-    env: 'test', host: '127.0.0.1', httpPort: 3000, smtpPort: 2525, domains: ['example.test'], maxMessageBytes: 65_536, storageDir,
+    env: 'test', host: '127.0.0.1', httpPort: 3000, smtpPort: 2525, domains: ['example.test'], maxMessageBytes: 65_536, maxAttachments: 10, maxAttachmentBytes: 65_536, storageDir,
     db: { host: '127.0.0.1', port: 3306, user: 'mail_platform_test', password: 'test', database: 'mail_platform_test', connectionLimit: 1 },
     relay: { host: '127.0.0.1', port: 2526, secure: false }, sessionTtlMs: 60_000, secureCookies: false,
   };
