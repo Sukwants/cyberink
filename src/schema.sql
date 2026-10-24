@@ -53,3 +53,14 @@ CREATE TABLE IF NOT EXISTS outbound_messages (
   INDEX idx_outbound_user_created (user_id, created_at),
   CONSTRAINT fk_outbound_user FOREIGN KEY (user_id) REFERENCES users(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS outbound_attachments (
+  id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
+  outbound_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  filename VARCHAR(1024) NOT NULL,
+  content_type VARCHAR(255) NOT NULL,
+  byte_size INT UNSIGNED NOT NULL,
+  storage_path TEXT NOT NULL,
+  INDEX idx_outbound_attachments_message (outbound_id),
+  CONSTRAINT fk_outbound_attachments_message FOREIGN KEY (outbound_id) REFERENCES outbound_messages(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
