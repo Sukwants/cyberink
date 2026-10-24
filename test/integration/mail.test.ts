@@ -59,6 +59,7 @@ test('WSL real MariaDB + SMTP + HTTP end-to-end', {timeout:90_000}, async t=>{
  let aliceId=0;
  let aliceMailbox:Mailbox;
  let received:MessageDetail;
+ let sentForDeletion:OutboundRecord;
 
  async function request(url:string,method='GET',body?:unknown,who='alice',extra:Record<string,string>={}) {
   const auth=session.get(who);
@@ -284,6 +285,7 @@ test('WSL real MariaDB + SMTP + HTTP end-to-end', {timeout:90_000}, async t=>{
    assert.equal(response.status,201);
    const record=await response.json() as OutboundRecord;
    assert.equal(record.status,'sent');
+   sentForDeletion=record;
    assert.equal(record.attachments.length,2);
    assert.ok(record.createdAt);
    assert.equal(captured.length,before+1);
@@ -327,6 +329,63 @@ test('WSL real MariaDB + SMTP + HTTP end-to-end', {timeout:90_000}, async t=>{
    session.clear();await login('alice',email);await login('bob',bobEmail);
    assert.equal((await request('/api/outbound/'+record.id)).status,200);
    assert.equal((await request('/api/outbound/attachments/'+record.attachments[0].id)).status,200);
+  });
+  await t.test('sent deletion is owner-only and survives restart without changing relay status or files',async()=>{
+   const record=sentForDeletion;
+   const url='/api/sent/'+record.id;
+   const auth=session.get('alice')!;
+   const calls=relayConnections;
+   const deliveries=captured.length;
+   const attachmentRows=await inspect.query('SELECT id,storage_path FROM outbound_attachments WHERE outbound_id=?',[record.id]);
+   const storedFiles=await Promise.all(attachmentRows.map(async(row:{id:string;storage_path:string})=>({
+    id:row.id,path:row.storage_path,bytes:await readFile(row.storage_path)
+   })));
+   assert.equal(storedFiles.length,2);
+   assert.equal((await request(url,'DELETE',undefined,'none')).status,401);
+   assert.equal((await fetch(httpBase+url,{method:'DELETE',headers:{cookie:auth.cookie}})).status,403);
+   assert.equal((await request(url,'DELETE',undefined,'alice',{origin:'https://attacker.test'})).status,403);
+   assert.equal((await request(url,'DELETE',undefined,'alice',{'sec-fetch-site':'cross-site'})).status,403);
+   assert.equal((await request('/api/sent/%3Cinvalid%3E','DELETE')).status,400);
+   assert.equal((await request('/api/sent/missing-'+run,'DELETE')).status,404);
+   assert.equal((await request(url,'DELETE',undefined,'bob')).status,404);
+   assert.equal((await request('/api/outbound/'+record.id)).status,200);
+   const unchanged=await inspect.query('SELECT status,is_deleted FROM outbound_messages WHERE id=?',[record.id]);
+   assert.equal(unchanged[0].status,'sent');assert.equal(Boolean(unchanged[0].is_deleted),false);
+   const result=await request(url,'DELETE');
+   assert.equal(result.status,200);assert.deepEqual(await result.json(),{ok:true});
+   assert.equal((await request(url,'DELETE')).status,404);
+   const persisted=await inspect.query('SELECT status,is_deleted FROM outbound_messages WHERE id=?',[record.id]);
+   assert.equal(persisted.length,1);
+   assert.equal(persisted[0].status,'sent');assert.equal(Boolean(persisted[0].is_deleted),true);
+   assert.equal((await request('/api/outbound/'+record.id)).status,404);
+   const sent=await (await request('/api/sent')).json() as {messages:OutboundSummary[]};
+   assert.equal(sent.messages.some(message=>message.id===record.id),false);
+   for(const file of storedFiles) {
+    assert.equal((await request('/api/outbound/attachments/'+file.id)).status,404);
+    assert.deepEqual(await readFile(file.path),file.bytes);
+   }
+   const metadata=await inspect.query('SELECT id FROM outbound_attachments WHERE outbound_id=?',[record.id]);
+   assert.equal(metadata.length,storedFiles.length);
+   const fresh=new Repository(config.db);
+   try {
+    await fresh.initialize();
+    assert.equal(await fresh.getOutbound(aliceId,record.id),undefined);
+    assert.equal((await fresh.listSent(aliceId)).some(message=>message.id===record.id),false);
+    for(const file of storedFiles) assert.equal(await fresh.getOutboundAttachment(aliceId,file.id),undefined);
+   } finally {await fresh.close();}
+   await web!.close();web=undefined;
+   web=await buildWeb({config,repository,outbound:new OutboundService(repository,config.relay,undefined,{storageDir:config.storageDir,maxMessageBytes:config.maxMessageBytes,maxAttachments:config.maxAttachments,maxAttachmentBytes:config.maxAttachmentBytes})});
+   httpBase=await web.listen({host:'127.0.0.1',port:0});
+   session.clear();await login('alice',email);await login('bob',bobEmail);
+   assert.equal((await request('/api/outbound/'+record.id)).status,404);
+   assert.equal((await request(url,'DELETE')).status,404);
+   const afterRestart=await (await request('/api/sent')).json() as {messages:OutboundSummary[]};
+   assert.equal(afterRestart.messages.some(message=>message.id===record.id),false);
+   for(const file of storedFiles) {
+    assert.equal((await request('/api/outbound/attachments/'+file.id)).status,404);
+    assert.deepEqual(await readFile(file.path),file.bytes);
+   }
+   assert.equal(relayConnections,calls);assert.equal(captured.length,deliveries);
   });
   await t.test('multipart authorization, CSRF, file count and encoded MIME limits prevent delivery',async()=>{
    const auth=session.get('alice')!;
@@ -424,6 +483,9 @@ test('WSL real MariaDB + SMTP + HTTP end-to-end', {timeout:90_000}, async t=>{
    await inspect.query('INSERT INTO outbound_messages (id,user_id,from_address,to_addresses,subject,text_body,status,error_message) VALUES (?,?,?,?,?,?,?,?)',
     [id,aliceId,email,JSON.stringify(['recipient@external.test']),'Legacy sent mail','Preserved text','sent',null]);
    await repository.initialize();
+   await repository.initialize();
+   const rows=await inspect.query('SELECT is_deleted FROM outbound_messages WHERE id=?',[id]);
+   assert.equal(Boolean(rows[0].is_deleted),false);
    const old=await repository.getOutbound(aliceId,id);
    assert.equal(old!.text,'Preserved text');assert.deepEqual(old!.attachments,[]);
    assert.ok((await repository.listSent(aliceId)).some(m=>m.id===id));
@@ -448,6 +510,22 @@ test('WSL real MariaDB + SMTP + HTTP end-to-end', {timeout:90_000}, async t=>{
    await new Promise(resolve=>setTimeout(resolve,100));
    assert.equal(attempts,1);
    assert.ok(relayConnections>=3);
+  });
+  await t.test('sent deletion rejects pending, failed and uncertain delivery records without changing them',async()=>{
+   const pending:OutboundRecord={id:randomUUID(),userId:aliceId,from:email,to:['recipient@external.test'],
+    subject:'Pending record',text:'Never submitted',status:'pending',error:null,createdAt:new Date().toISOString(),attachments:[]};
+   await repository.createOutbound(pending);
+   const records=await inspect.query('SELECT id,status,is_deleted FROM outbound_messages WHERE user_id=? AND status<>?', [aliceId,'sent']);
+   assert.deepEqual(new Set(records.map((record:{status:OutboundStatus})=>record.status)),new Set(['pending','temp_failed','permanent_failed','unknown']));
+   const calls=relayConnections;
+   for(const record of records) {
+    assert.equal(Boolean(record.is_deleted),false);
+    assert.equal((await request('/api/sent/'+record.id,'DELETE')).status,404);
+    assert.equal((await repository.getOutbound(aliceId,record.id))!.status,record.status);
+    const rows=await inspect.query('SELECT status,is_deleted FROM outbound_messages WHERE id=?',[record.id]);
+    assert.equal(rows[0].status,record.status);assert.equal(Boolean(rows[0].is_deleted),false);
+   }
+   assert.equal(relayConnections,calls);
   });
   await t.test('multi-recipient delivery has independent scoped message and attachment identities',async()=>{
    const result=await localClient(smtpPort).sendMail({...fixture([email,bobEmail,email]),subject:'Shared delivery'});

@@ -18,6 +18,13 @@ test('Web sessions reject cross-site changes and enforce mailbox ownership', asy
   await writeFile(attachmentPath, 'Attachment content');
   const user = { id: 1, email: 'alice@example.test', passwordHash: await hashPassword('test-password-123') };
   const message = { id: 'message-one', fromAddress: 'sender@example.test', toAddress: user.email, subject: 'A real subject', createdAt: new Date().toISOString(), isRead: false, textBody: '<script>unsafe()</script>', attachments: [{ id: 'attachment-one', filename: 'note.txt', contentType: 'text/plain', size: 18 }] };
+  const sentMessage: OutboundRecord = {
+    id: 'sent-message-one', userId: user.id, from: user.email, to: ['recipient@example.test'],
+    subject: 'Sent subject', text: 'Sent body', status: 'sent', error: null, createdAt: new Date().toISOString(),
+    attachments: [{ id: 'sent-attachment-one', filename: 'note.txt', contentType: 'text/plain', size: 18 }],
+  };
+  let sentDeleted = false;
+  let deleteSentCalls = 0;
   let deleted = false;
   let sends = 0;
   const repository: MailRepository = {
@@ -34,7 +41,18 @@ test('Web sessions reject cross-site changes and enforce mailbox ownership', asy
     setRead: async (id, messageId, isRead) => { if (id !== user.id || messageId !== message.id || deleted) return false; message.isRead = isRead; return true; },
     deleteMessage: async (id, messageId) => { if (id !== user.id || messageId !== message.id || deleted) return false; deleted = true; return true; },
     getAttachment: async (id, attachmentId) => id !== user.id || deleted ? undefined : attachmentId === 'attachment-one' ? { ...message.attachments[0], path: attachmentPath } : attachmentId === 'attachment-outside' ? { ...message.attachments[0], path: outsidePath } : undefined,
-    createOutbound: async () => {}, listSent: async () => [], getOutboundAttachment: async () => undefined, setOutboundStatus: async () => {}, getOutbound: async () => undefined,
+    createOutbound: async () => {},
+    listSent: async (id) => id === user.id && !sentDeleted ? [sentMessage] : [],
+    deleteSent: async (id, messageId) => {
+      deleteSentCalls++;
+      if (id !== user.id || messageId !== sentMessage.id || sentDeleted) return false;
+      sentDeleted = true;
+      return true;
+    },
+    getOutboundAttachment: async (id, attachmentId) => id === user.id && attachmentId === 'sent-attachment-one' && !sentDeleted
+      ? { ...sentMessage.attachments[0], path: attachmentPath } : undefined,
+    setOutboundStatus: async () => {},
+    getOutbound: async (id, messageId) => id === user.id && messageId === sentMessage.id && !sentDeleted ? sentMessage : undefined,
   };
   const outbound: OutboundSender = { send: async (userId, input) => { sends++; return { id: 'outbound-one', userId, ...input, attachments: [], createdAt: new Date().toISOString(), status: 'sent', error: null }; } };
   const config: AppConfig = {
@@ -133,6 +151,27 @@ test('Web sessions reject cross-site changes and enforce mailbox ownership', asy
   assert.equal((await app.inject({ method: 'DELETE', url: '/api/messages/message-one', headers: auth })).statusCode, 200);
   assert.equal((await app.inject({ url: '/api/messages/message-one', headers: auth })).statusCode, 404);
   assert.equal((await app.inject({ url: '/api/attachments/attachment-one', headers: auth })).statusCode, 404);
+  await t.test('sent deletion validates authentication, CSRF, origin and IDs before hiding the record', async () => {
+    const url = '/api/sent/' + sentMessage.id;
+    assert.equal((await app.inject({ method: 'DELETE', url })).statusCode, 401);
+    assert.equal((await app.inject({ method: 'DELETE', url, headers: { cookie } })).statusCode, 403);
+    assert.equal((await app.inject({ method: 'DELETE', url, headers: { ...auth, origin: 'https://attacker.test' } })).statusCode, 403);
+    assert.equal((await app.inject({ method: 'DELETE', url, headers: { ...auth, 'sec-fetch-site': 'cross-site' } })).statusCode, 403);
+    assert.equal((await app.inject({ method: 'DELETE', url: '/api/sent/%3Cinvalid%3E', headers: auth })).statusCode, 400);
+    assert.equal(deleteSentCalls, 0);
+    assert.equal((await app.inject({ method: 'DELETE', url: '/api/sent/missing-sent', headers: auth })).statusCode, 404);
+    assert.equal(sentDeleted, false);
+    assert.equal((await app.inject({ url: '/api/outbound/' + sentMessage.id, headers: auth })).statusCode, 200);
+    assert.equal((await app.inject({ url: '/api/outbound/attachments/sent-attachment-one', headers: auth })).statusCode, 200);
+    assert.equal((await app.inject({ url: '/api/sent', headers: auth })).json().messages[0].id, sentMessage.id);
+    const result = await app.inject({ method: 'DELETE', url, headers: auth });
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(result.json(), { ok: true });
+    assert.equal((await app.inject({ method: 'DELETE', url, headers: auth })).statusCode, 404);
+    assert.deepEqual((await app.inject({ url: '/api/sent', headers: auth })).json(), { messages: [] });
+    assert.equal((await app.inject({ url: '/api/outbound/' + sentMessage.id, headers: auth })).statusCode, 404);
+    assert.equal((await app.inject({ url: '/api/outbound/attachments/sent-attachment-one', headers: auth })).statusCode, 404);
+  });
   assert.equal((await app.inject({ method: 'POST', url: '/api/logout', headers: auth })).statusCode, 200);
   assert.equal((await app.inject({ url: '/api/inbox', headers: auth })).statusCode, 401);
 });

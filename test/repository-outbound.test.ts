@@ -72,3 +72,52 @@ test('pool release failure cannot turn a committed outbound intent into a failed
   await repository.createOutbound(record, []);
   assert.deepEqual(events, ['begin', 'intent', 'commit', 'release', 'destroy']);
 });
+
+function setupQueries(t: TestContext, results: unknown[]) {
+  const queries: Array<{ sql: string; values: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, values: unknown[]) => {
+      queries.push({ sql, values });
+      assert.ok(results.length > 0, 'unexpected database query');
+      return results.shift();
+    },
+    end: async () => {},
+  };
+  t.mock.method(mariadb, 'createPool', () => pool as unknown as Pool);
+  const repository = new Repository({ host: '127.0.0.1', port: 3306, user: 'unused', password: 'unused', database: 'unused', connectionLimit: 1 });
+  return { repository, queries };
+}
+
+test('sent deletion changes only the visibility flag for a visible sent message owned by the user', async (t) => {
+  const { repository, queries } = setupQueries(t, [{ affectedRows: 1 }, { affectedRows: 0 }]);
+  assert.equal(await repository.deleteSent(record.userId, record.id), true);
+  assert.equal(await repository.deleteSent(record.userId, record.id), false);
+  assert.match(queries[0].sql, /^UPDATE outbound_messages SET is_deleted = TRUE WHERE /);
+  assert.match(queries[0].sql, /user_id = \? AND id = \? AND status = 'sent' AND is_deleted = FALSE$/);
+  assert.deepEqual(queries[0].values, [record.userId, record.id]);
+});
+
+test('sent listing, outbound details and attachment access exclude deleted messages', async (t) => {
+  const { repository, queries } = setupQueries(t, [[], [], []]);
+  assert.deepEqual(await repository.listSent(record.userId), []);
+  assert.equal(await repository.getOutbound(record.userId, record.id), undefined);
+  assert.equal(await repository.getOutboundAttachment(record.userId, attachment.id), undefined);
+  for (const query of queries) assert.match(query.sql, /is_deleted = FALSE/);
+  assert.deepEqual(queries.map((query) => query.values), [
+    [record.userId], [record.userId, record.id], [record.userId, attachment.id],
+  ]);
+});
+
+test('an idempotent status update still recognizes a soft-deleted outbound record', async (t) => {
+  const { repository, queries } = setupQueries(t, [{ affectedRows: 0 }, [{ id: record.id }]]);
+  await repository.setOutboundStatus(record.id, record.userId, 'sent');
+  assert.equal(queries.length, 2);
+  assert.match(queries[1].sql, /WHERE id = \? AND user_id = \?$/);
+  assert.doesNotMatch(queries[1].sql, /is_deleted/);
+  assert.deepEqual(queries[1].values, [record.id, record.userId]);
+});
+
+test('an unchanged status update rejects a missing outbound record', async (t) => {
+  const { repository } = setupQueries(t, [{ affectedRows: 0 }, []]);
+  await assert.rejects(repository.setOutboundStatus(record.id, record.userId, 'sent'), /Outbound message does not exist/);
+});

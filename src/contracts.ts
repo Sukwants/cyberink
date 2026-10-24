@@ -26,6 +26,7 @@ export interface MailRepository {
  getAttachment(userId: number, id: string): Promise<AttachmentRecord | undefined>;
  createOutbound(record: OutboundRecord, attachments?: AttachmentRecord[]): Promise<void>;
  listSent(userId: number): Promise<OutboundSummary[]>;
+ deleteSent(userId: number, id: string): Promise<boolean>;
  getOutboundAttachment(userId: number, id: string): Promise<AttachmentRecord | undefined>;
  setOutboundStatus(id: string, userId: number, status: OutboundStatus, error?: string): Promise<void>;
  getOutbound(userId: number, id: string): Promise<OutboundRecord | undefined>;

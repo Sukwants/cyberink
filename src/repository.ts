@@ -229,15 +229,23 @@ export class Repository implements MailRepository {
 
   async listSent(userId: number): Promise<OutboundSummary[]> {
     const rows = await this.pool.query<OutboundSummaryRow[]>(
-      "SELECT id, user_id, from_address, to_addresses, subject, status, error_message, created_at FROM outbound_messages WHERE user_id = ? AND status = 'sent' ORDER BY created_at DESC, id DESC",
+      "SELECT id, user_id, from_address, to_addresses, subject, status, error_message, created_at FROM outbound_messages WHERE user_id = ? AND status = 'sent' AND is_deleted = FALSE ORDER BY created_at DESC, id DESC",
       [userId],
     );
     return rows.map(outboundSummaryFromRow);
   }
 
+  async deleteSent(userId: number, id: string): Promise<boolean> {
+    const result = await this.pool.query<ChangeResult>(
+      "UPDATE outbound_messages SET is_deleted = TRUE WHERE user_id = ? AND id = ? AND status = 'sent' AND is_deleted = FALSE",
+      [userId, id],
+    );
+    return result.affectedRows > 0;
+  }
+
   async getOutboundAttachment(userId: number, id: string): Promise<AttachmentRecord | undefined> {
     const rows = await this.pool.query<AttachmentRow[]>(
-      'SELECT a.id, a.filename, a.content_type, a.byte_size, a.storage_path FROM outbound_attachments a JOIN outbound_messages m ON m.id = a.outbound_id WHERE m.user_id = ? AND a.id = ?',
+      'SELECT a.id, a.filename, a.content_type, a.byte_size, a.storage_path FROM outbound_attachments a JOIN outbound_messages m ON m.id = a.outbound_id WHERE m.user_id = ? AND a.id = ? AND m.is_deleted = FALSE',
       [userId, id],
     );
     return rows[0] ? attachmentFromRow(rows[0]) : undefined;
@@ -248,14 +256,18 @@ export class Repository implements MailRepository {
       'UPDATE outbound_messages SET status = ?, error_message = ? WHERE id = ? AND user_id = ?',
       [status, error ?? null, id, userId],
     );
-    if (result.affectedRows === 0 && !(await this.getOutbound(userId, id))) {
-      throw new Error('Outbound message does not exist');
+    if (result.affectedRows === 0) {
+      const rows = await this.pool.query<Array<{ id: string }>>(
+        'SELECT id FROM outbound_messages WHERE id = ? AND user_id = ?',
+        [id, userId],
+      );
+      if (rows.length === 0) throw new Error('Outbound message does not exist');
     }
   }
 
   async getOutbound(userId: number, id: string): Promise<OutboundRecord | undefined> {
     const rows = await this.pool.query<OutboundRow[]>(
-      'SELECT id, user_id, from_address, to_addresses, subject, text_body, status, error_message, created_at FROM outbound_messages WHERE user_id = ? AND id = ?',
+      'SELECT id, user_id, from_address, to_addresses, subject, text_body, status, error_message, created_at FROM outbound_messages WHERE user_id = ? AND id = ? AND is_deleted = FALSE',
       [userId, id],
     );
     const row = rows[0];
