@@ -11,7 +11,7 @@ Cyberink 是一个简易的自托管邮箱服务，提供 SMTP 收信和 Web 邮
 ### 1. 准备依赖
 
 - Node.js 22 或以上。
-- pnpm 10.19.0。
+- npm 10 或以上（随 Node.js 安装）。
 - 已启动且可连接的 MariaDB。
 
 ### 2. 安装并配置数据库
@@ -19,7 +19,7 @@ Cyberink 是一个简易的自托管邮箱服务，提供 SMTP 收信和 Web 邮
 安装项目依赖，首次使用时复制配置文件：
 
 ```bash
-pnpm install --frozen-lockfile
+npm ci
 cp .env.example .env
 chmod 600 .env
 ```
@@ -51,7 +51,7 @@ DB_PASSWORD=replace-with-a-strong-password
 初始化表结构：
 
 ```bash
-pnpm db:init
+npm run db:init
 ```
 
 `db:init` 创建应用所需的表并补充新增字段，数据库和数据库账号需要提前准备。
@@ -64,7 +64,7 @@ pnpm db:init
 read -r -s -p "邮箱密码: " MAIL_PASSWORD
 printf '\n'
 export MAIL_PASSWORD
-pnpm user:add alice@example.test
+npm run user:add -- alice@example.test
 unset MAIL_PASSWORD
 ```
 
@@ -83,8 +83,8 @@ MAIL_DOMAINS=example.com
 启动前按下文“配置 SMTP 发信”填写可用的 SMTP Relay 配置，再构建并启动 Cyberink：
 
 ```bash
-pnpm build
-pnpm start
+npm run build
+npm start
 ```
 
 默认服务地址：
@@ -96,7 +96,7 @@ pnpm start
 
 打开 Web 邮箱，使用刚创建的邮箱地址和密码登录。按 Ctrl+C 停止服务。
 
-修改源码时可以使用 `pnpm dev`，该命令会在文件变化后自动重启应用。不要与 `pnpm start` 同时占用相同端口。
+修改源码时可以使用 `npm run dev`，该命令会在文件变化后自动重启应用。不要与 `npm start` 同时占用相同端口。
 
 ## 使用 Web 邮箱
 
@@ -219,7 +219,7 @@ location / {
 
 `TRUST_PROXY` 填写 Nginx 连接应用时的源 IP，而非浏览器 IP；支持多个明确的 IPv4 或 IPv6 地址，例如 `127.0.0.1,::1`。Nginx 在其他主机上时，填写对应代理地址，并将应用 HTTP 端口限制为仅允许该代理连接。
 
-更新代码后执行 `pnpm build` 并重启应用；修改 Nginx 配置后，检查配置并重载。生产模式仍需通过 HTTPS 访问，并配置带认证的 TLS Relay。
+更新代码后执行 `npm run build` 并重启应用；修改 Nginx 配置后，检查配置并重载。生产模式仍需通过 HTTPS 访问，并配置带认证的 TLS Relay。
 
 ## 数据保存与备份
 
@@ -234,9 +234,9 @@ location / {
 更新源码后，在项目根目录执行：
 
 ```bash
-pnpm install --frozen-lockfile
-pnpm db:init
-pnpm build
+npm ci
+npm run db:init
+npm run build
 ```
 
 随后重启 Cyberink 并刷新浏览器。

@@ -16,7 +16,7 @@ try {
   const user = await repository.createUser(email,passwordHash);
   await repository.createMailbox(user.id,email);
   console.log('Created mailbox ' + email);
- } else throw new Error('Usage: pnpm db:init | MAIL_PASSWORD=... pnpm user:add alice@example.test');
+ } else throw new Error('Usage: npm run db:init | MAIL_PASSWORD=... npm run user:add -- alice@example.test');
 } catch (error) {
  console.error(error instanceof Error ? error.message : 'Command failed');
  process.exitCode = 1;
